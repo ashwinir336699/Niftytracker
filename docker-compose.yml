@@ -1,0 +1,57 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Nifty50 Stock Tracker — Docker Compose
+#
+# Quick start:
+#   docker compose up -d --build
+#
+# Stop:
+#   docker compose down
+#
+# View logs:
+#   docker compose logs -f
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  tracker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: nifty50-stock-tracker:latest
+    container_name: nifty50-tracker
+    ports:
+      - "${HOST_PORT:-8501}:8501"
+    volumes:
+      - app_data:/data          # watchlist SQLite + ML model cache
+    environment:
+      - DATA_DIR=/data
+      - TZ=Asia/Kolkata
+      # Optional: override Streamlit secrets via env vars
+      # - FIREBASE_API_KEY=${FIREBASE_API_KEY}
+      # - SUPABASE_URL=${SUPABASE_URL}
+      # - SUPABASE_KEY=${SUPABASE_KEY}
+    restart: unless-stopped
+    mem_limit: 1500m
+    cpus: "1.5"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 25s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  app_data:
+    driver: local
+    # To use a bind-mount instead (data visible on host):
+    # driver_opts:
+    #   type: none
+    #   o: bind
+    #   device: ./local_data

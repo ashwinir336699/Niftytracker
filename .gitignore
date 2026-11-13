@@ -1,0 +1,103 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+pipes/
+put/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.env.*
+*.env
+env.local
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# -----------------------------------------------------------------------
+# Secrets & credentials  — NEVER commit these
+# -----------------------------------------------------------------------
+.streamlit/secrets.toml          # Streamlit secrets (real values)
+secrets.toml                     # accidental root-level copy
+**/secrets.toml                  # any nested copy
+
+# Firebase service account keys
+serviceAccountKey.json
+firebase-*.json
+*-firebase-adminsdk-*.json
+google-services.json
+
+# Twilio / general API credential files
+twilio*.json
+twilio*.env
+
+# Generic private-key / certificate files
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+*.cer
+*.crt
+
+# dotenv files (may contain SMTP_PASSWORD, etc.)
+.env.development
+.env.production
+.env.staging
+.env.test
+.env.local
+
+# -----------------------------------------------------------------------
+# SQLite runtime databases (contain cached price data, not secrets,
+# but no value committing generated artefacts)
+# -----------------------------------------------------------------------
+*.db
+*.sqlite
+*.sqlite3
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Logs — keep the folder structure, ignore the actual log files
+logs/*.log
+logs/*.log.*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
