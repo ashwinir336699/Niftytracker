@@ -1,0 +1,208 @@
+"""
+Insider Trading Agent - Analyzes NSE SAST/PIT filings.
+
+Extracts insider trading signals and calculates net insider sentiment.
+Uses LLM for complex parsing and summarization when needed.
+"""
+
+import logging
+from typing import Any
+
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import PydanticOutputParser
+from pydantic import BaseModel, Field
+
+from src.llm import get_llm
+from src.connectors.insider_connector import get_insider_connector
+
+logger = logging.getLogger(__name__)
+
+
+class InsiderAnalysis(BaseModel):
+    """Schema for insider trading analysis output."""
+    insider_score: float = Field(description="Score from -1.0 (heavy selling) to 1.0 (heavy buying)")
+    sentiment: str = Field(description="BEARISH, NEUTRAL, or BULLISH based on insider activity")
+    total_buy_value: float = Field(description="Total value of insider purchases in ₹ Lakhs")
+    total_sell_value: float = Field(description="Total value of insider sales in ₹ Lakhs")
+    key_transactions: list[str] = Field(description="List of notable insider transactions")
+    summary: str = Field(description="Brief summary of insider activity patterns")
+
+
+class InsiderAgent:
+    """
+    Analyzes insider trading activity from SEC Form 4 filings.
+    
+    Uses edgartools for data and LLM for complex analysis.
+    """
+    
+    def __init__(self, model: str | None = None):
+        self.insider_connector = get_insider_connector()
+        self._llm = None
+        self.parser = PydanticOutputParser(pydantic_object=InsiderAnalysis)
+        
+        self.prompt = PromptTemplate(
+            template="""Analyze the following insider trading data for {ticker} (Indian stock market, NSE SAST/PIT regulations).
+
+Insider Transactions:
+{transactions}
+
+Consider:
+1. Net buying vs selling activity
+2. Who is trading (Promoter, Director, KMP are most significant under SEBI regulations)
+3. Size of transactions relative to typical activity
+4. Timing patterns (clustered buying/selling by 3+ insiders = strong signal)
+
+A score of 1.0 means heavy insider buying (very bullish signal).
+A score of -1.0 means heavy insider selling (bearish signal).
+A score of 0.0 means neutral or no significant activity.
+
+Values are in ₹ Lakhs.
+
+{format_instructions}
+""",
+            input_variables=["ticker", "transactions"],
+            partial_variables={"format_instructions": self.parser.get_format_instructions()},
+        )
+        
+        self._chain = None
+
+    @property
+    def llm(self):
+        if self._llm is None:
+            self._llm = get_llm(temperature=0.0)
+        return self._llm
+
+    @property
+    def chain(self):
+        if self._chain is None:
+            self._chain = self.prompt | self.llm | self.parser
+        return self._chain
+
+    def analyze(self, ticker: str, days: int = 1) -> dict[str, Any]:
+        """
+        Analyze insider trading activity for a ticker.
+        
+        Args:
+            ticker: Stock symbol
+            days: Days to look back (default: 1)
+            
+        Returns:
+            Dict with insider_score, sentiment, transactions summary
+        """
+        try:
+            # DEMO MODE OVERRIDE
+            # Check for demo override file
+            import os
+            import json
+            from pathlib import Path
+            demo_file = str(Path(__file__).resolve().parents[2] / "data" / "demo_insider.json")
+            if os.path.exists(demo_file):
+                try:
+                    with open(demo_file, "r") as f:
+                        demo_data = json.load(f)
+                        if ticker in demo_data:
+                            logger.info(f"🧪 DEMO MODE: Using mocked insider data for {ticker}")
+                            transactions = demo_data[ticker]
+                            # Skip normal fetch
+                            return self._process_transactions(ticker, transactions)
+                except Exception as e:
+                    logger.warning(f"Failed to load demo data: {e}")
+
+            # Fetch insider trades from NSE (SAST/PIT)
+            logger.info(f"🔍 Insider Agent: Fetching trades for {ticker} (last {days} days)")
+            transactions = self.insider_connector.get_insider_trades(ticker, days=days)
+            
+            
+            logger.info(f"🔍 Insider Agent: Found {len(transactions)} transactions")
+            
+            return self._process_transactions(ticker, transactions)
+            
+        except Exception as e:
+            logger.error(f"Insider analysis error for {ticker}: {e}")
+            return self._neutral_response(f"Analysis error: {str(e)}")
+
+    def _process_transactions(self, ticker: str, transactions: list[dict]) -> dict[str, Any]:
+        """Process transactions and run LLM analysis."""
+        if not transactions:
+            logger.info(f"🔍 Insider Agent: No recent transactions found, returning neutral")
+            return self._neutral_response("No recent insider transactions found")
+        
+        # Check if we need LLM fallback
+        if transactions[0].get("insider_name") == "LLM_FALLBACK_REQUIRED":
+            return self._llm_web_analysis(ticker)
+        
+        # Format transactions for LLM analysis
+        trans_text = self._format_transactions(transactions)
+        
+        # Use LLM to analyze patterns
+        result = self.chain.invoke({
+            "ticker": ticker,
+            "transactions": trans_text
+        })
+        
+        return result.model_dump()
+    
+    def _format_transactions(self, transactions: list[dict]) -> str:
+        """Format transaction data for LLM prompt."""
+        if not transactions:
+            return "No transactions found."
+        
+        parts = []
+        for i, trans in enumerate(transactions[:15], 1):  # Limit to 15
+            parts.append(
+                f"[{i}] {trans.get('person_name', trans.get('insider_name', 'Unknown'))} "
+                f"({trans.get('person_category', 'Unknown')}) - "
+                f"{trans.get('trade_type', trans.get('transaction_type', 'Unknown'))} - "
+                f"{trans.get('quantity', trans.get('shares', 0))} shares - "
+                f"₹{trans.get('value_lakhs', 0):.2f}L - "
+                f"Date: {trans.get('trade_date', trans.get('filing_date', 'Unknown'))}"
+            )
+        return "\n".join(parts)
+    
+    def _llm_web_analysis(self, ticker: str) -> dict[str, Any]:
+        """
+        Use LLM to analyze insider trading when edgartools unavailable.
+        
+        The LLM will use its knowledge to provide general guidance.
+        """
+        try:
+            prompt = f"""Based on your knowledge, provide a general analysis of typical 
+insider trading patterns for {ticker}. 
+
+Note: This is a fallback when real-time SEC data is unavailable.
+Provide conservative estimates and clearly indicate this is based on general knowledge.
+
+Return a JSON with:
+- insider_score: float (-1 to 1), be conservative (use 0 to 0.3 range)
+- sentiment: "NEUTRAL" (since we don't have real data)
+- total_buy_value: 0
+- total_sell_value: 0
+- key_transactions: ["No real-time data available - using LLM fallback"]
+- summary: Brief note about typical insider activity patterns for this company
+"""
+            response = self.llm.invoke(prompt)
+            
+            # Parse response manually since it's freeform
+            return {
+                "insider_score": 0.0,
+                "sentiment": "NEUTRAL",
+                "total_buy_value": 0,
+                "total_sell_value": 0,
+                "key_transactions": ["LLM fallback - no real-time SEC data"],
+                "summary": response.content[:500] if hasattr(response, 'content') else "Fallback analysis"
+            }
+            
+        except Exception as e:
+            logger.error(f"LLM fallback error: {e}")
+            return self._neutral_response("LLM fallback failed")
+    
+    def _neutral_response(self, reason: str) -> dict[str, Any]:
+        """Return neutral response when analysis fails."""
+        return {
+            "insider_score": 0.0,
+            "sentiment": "NEUTRAL",
+            "total_buy_value": 0,
+            "total_sell_value": 0,
+            "key_transactions": [reason],
+            "summary": reason
+        }

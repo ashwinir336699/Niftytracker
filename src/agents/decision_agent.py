@@ -1,0 +1,125 @@
+"""
+Decision Agent (Orchestrator).
+Refactored to use LangChain.
+"""
+
+import json
+import logging
+from typing import Any, Dict
+
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import PydanticOutputParser
+from pydantic import BaseModel, Field
+
+from src.llm import get_llm
+
+logger = logging.getLogger(__name__)
+
+
+class DecisionOutput(BaseModel):
+    """Schema for decision output."""
+    recommendation: str = Field(description="BUY, SELL, or HOLD")
+    confidence: float = Field(description="Confidence score between 0.0 and 1.0")
+    reasoning: str = Field(description="Concise explanation of the decision")
+    primary_driver: str = Field(description="Sentiment, Technical, Risk, or Mixed")
+
+
+class DecisionAgent:
+    """
+    Final decision maker using LangChain.
+    """
+
+    def __init__(self, model: str | None = None):
+        self._llm = None
+        self.parser = PydanticOutputParser(pydantic_object=DecisionOutput)
+        
+        self.prompt = PromptTemplate(
+            template="""You are a senior portfolio manager making a final trading decision for {ticker}.
+
+Synthesize the following analyses:
+
+1. MARKET SENTIMENT:
+{sentiment_data}
+
+2. TECHNICAL ANALYSIS:
+{technical_data}
+
+3. RISK ASSESSMENT:
+{risk_data}
+
+4. GLOBAL MARKET CONTEXT:
+{global_context}
+
+Consider how global factors (VIX, Fear & Greed, commodity prices, yield curve)
+affect this Indian stock. Oil prices impact ONGC/Reliance, US tech affects TCS/Infy,
+gold correlates with defensive plays. A RISK-OFF global environment warrants caution.
+
+Make a definitive recommendation (BUY, SELL, or HOLD).
+
+{format_instructions}
+""",
+            input_variables=["ticker", "sentiment_data", "technical_data", "risk_data", "global_context"],
+            partial_variables={"format_instructions": self.parser.get_format_instructions()},
+        )
+
+        self._chain = None
+
+    @property
+    def llm(self):
+        if self._llm is None:
+            self._llm = get_llm(temperature=0.1)
+        return self._llm
+
+    @property
+    def chain(self):
+        if self._chain is None:
+            self._chain = self.prompt | self.llm | self.parser
+        return self._chain
+
+    def decide(
+        self,
+        ticker: str,
+        sentiment_data: Dict[str, Any],
+        technical_data: Dict[str, Any],
+        risk_data: Dict[str, Any],
+        global_context: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        """
+        Generate final trading decision.
+        """
+        try:
+            ctx_str = json.dumps(global_context) if global_context else "No global context available."
+            # Invoke chain
+            result = self.chain.invoke({
+                "ticker": ticker,
+                "sentiment_data": json.dumps(sentiment_data),
+                "technical_data": json.dumps(technical_data),
+                "risk_data": json.dumps(risk_data),
+                "global_context": ctx_str,
+            })
+            
+            return result.model_dump()
+            
+        except Exception as e:
+            logger.error(f"Decision agent error: {e}")
+            return self._heuristic_fallback(sentiment_data, technical_data, risk_data)
+
+    def _heuristic_fallback(self, sentiment, technical, risk) -> Dict[str, Any]:
+        """Simple rule-based fallback."""
+        sent_score = sentiment.get("sentiment_score", 0)
+        tech_score = technical.get("technical_score", 0)
+        
+        final_score = (sent_score * 0.6) + (tech_score * 0.4)
+        
+        rec = "HOLD"
+        if final_score > 0.3:
+            rec = "BUY"
+        elif final_score < -0.3:
+            rec = "SELL"
+            
+        return {
+            "recommendation": rec,
+            "confidence": 0.5,
+            "reasoning": "Fallback logic used due to agent error.",
+            "primary_driver": "Heuristic"
+        }
