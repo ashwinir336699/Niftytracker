@@ -1,0 +1,92 @@
+[project]
+name = "alphastream-india"
+version = "0.2.0"
+description = "AI-powered investment intelligence for the Indian investor — Pathway streaming, multi-agent signals, NLQ analytics"
+readme = "README.md"
+authors = [{name = "Rickarya Das", email = "rickarya.das@example.com"}]
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    # Core framework
+    "pathway>=0.28.0",
+    "pathway[xpack-llm-docs]",
+    # API & async
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "websockets>=12.0",
+    # LLM
+    "openai>=1.3.0",
+    "langchain>=0.3.0",
+    "langchain-core>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "langchain-google-vertexai>=2.0.0",
+    # LangGraph + MCP (NLQ agent)
+    "langgraph>=0.2.0",
+    "langchain-mcp-adapters>=0.0.1",
+    "fastmcp>=2.0.0",
+    # Data processing
+    "pandas>=2.1.0",
+    "numpy>=1.26.0",
+    "requests>=2.31.0",
+    "aiohttp>=3.9.0",
+    "nltk>=3.8.0",
+    # Financial data — Indian market
+    "yfinance>=0.2.32",
+    "ta>=0.10.2",
+    "mplfinance>=0.12.9",
+    # Analytics DB
+    "duckdb>=1.0.0",
+    "chromadb>=0.4.0",
+    # Auth
+    "pyotp>=2.9.0",
+    # Search + ML
+    "duckduckgo-search>=7.0.0",
+    "river>=0.21.0",
+    "redis>=5.0.0",
+    # Utilities
+    "python-dotenv>=1.0.0",
+    "edgartools>=5.10.2",
+    "reportlab>=4.4.9",
+    "matplotlib>=3.10.8",
+    "sentence-transformers>=5.2.0",
+    "feedparser>=6.0.12",
+    "pdf2image>=1.17.0",
+    "poppler-utils>=0.1.0",
+    "unstructured>=0.18.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "httpx>=0.25.0",
+]
+
+# GPU support (optional - installs CUDA libs)
+gpu = [
+    "sentence-transformers>=2.2.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+# Force CPU-only torch via index
+[tool.uv]
+index-url = "https://pypi.org/simple"
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
