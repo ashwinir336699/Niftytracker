@@ -1,0 +1,257 @@
+"""
+Groww API connector.
+
+Uses JWT + TOTP authentication for Indian market data.
+Provides stock quotes, search, and fundamentals via Groww's API.
+"""
+import logging
+import time
+from typing import Any, Optional
+
+import requests
+
+from src.connectors.base_connector import IndianDataSource, strip_suffix
+from src.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+try:
+    import pyotp
+    PYOTP_AVAILABLE = True
+except ImportError:
+    PYOTP_AVAILABLE = False
+
+# Known Groww API base URLs (reverse-engineered)
+GROWW_API_BASE = "https://groww.in/v1/api"
+GROWW_SEARCH_URL = "https://groww.in/v1/api/search/v1/entity"
+GROWW_STOCK_URL = "https://groww.in/v1/api/stocks_data/v1/accord_points/exchange/NSE/segment/CASH"
+
+
+class GrowwConnector(IndianDataSource):
+    """Groww API connector with JWT + TOTP auth."""
+
+    def __init__(self):
+        settings = get_settings()
+        self._token = settings.groww_api_token
+        self._totp_secret = settings.groww_totp_secret
+        self._session = requests.Session()
+        self._session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        })
+        self._authenticated = False
+
+    @property
+    def name(self) -> str:
+        return "Groww"
+
+    def _get_totp_code(self) -> str:
+        """Generate current TOTP code from secret."""
+        if not PYOTP_AVAILABLE or not self._totp_secret:
+            return ""
+        totp = pyotp.TOTP(self._totp_secret)
+        return totp.now()
+
+    def _ensure_auth(self) -> bool:
+        """Set auth headers using JWT token."""
+        if not self._token:
+            logger.warning("Groww API token not configured")
+            return False
+        if self._authenticated:
+            return True
+
+        self._session.headers["Authorization"] = f"Bearer {self._token}"
+
+        # If TOTP is configured, generate and add OTP header
+        otp = self._get_totp_code()
+        if otp:
+            self._session.headers["X-Otp"] = otp
+
+        self._authenticated = True
+        return True
+
+    def _api_get(self, url: str, params: dict = None) -> Optional[dict]:
+        """Make authenticated GET request."""
+        if not self._ensure_auth():
+            return None
+        try:
+            resp = self._session.get(url, params=params, timeout=15)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.warning(f"Groww API failed: {e}")
+            return None
+
+    def get_stock_quote(self, symbol: str) -> dict[str, Any]:
+        """Fetch stock quote from Groww using tr_live_prices endpoint."""
+        clean = strip_suffix(symbol)
+        data = self._api_get(
+            f"https://groww.in/v1/api/stocks_data/v1/tr_live_prices/exchange/NSE/segment/CASH/{clean}/latest",
+        )
+        if data and data.get("ltp"):
+            return {
+                "ticker": clean,
+                "price": data.get("ltp", 0),
+                "close": data.get("close", 0),
+                "change": data.get("dayChange", 0),
+                "change_pct": round(data.get("dayChangePerc", 0), 2),
+                "volume": data.get("volume", 0),
+                "high": data.get("high", 0),
+                "low": data.get("low", 0),
+                "open": data.get("open", 0),
+                "year_high": data.get("yearHighPrice", 0),
+                "year_low": data.get("yearLowPrice", 0),
+                "total_buy_qty": data.get("totalBuyQty", 0),
+                "total_sell_qty": data.get("totalSellQty", 0),
+                "last_trade_time": data.get("lastTradeTime", 0),
+                "source": "Groww",
+            }
+        return {"ticker": clean, "price": 0, "error": "Groww API unavailable", "source": "Groww"}
+
+    def get_historical_data(self, symbol: str, period: str = "1y"):
+        """Fetch OHLCV candles from Groww charting service."""
+        import pandas as pd
+        import time as _time
+
+        clean = strip_suffix(symbol)
+        now = int(_time.time() * 1000)
+        period_ms = {
+            "1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825,
+        }
+        days = period_ms.get(period, 365)
+        start = now - (days * 24 * 3600 * 1000)
+
+        data = self._api_get(
+            f"https://groww.in/v1/api/charting_service/v2/chart/exchange/NSE/segment/CASH/{clean}",
+            params={
+                "endTimeInMillis": now,
+                "intervalInMinutes": 1440,
+                "startTimeInMillis": start,
+            },
+        )
+        if data and "candles" in data and data["candles"]:
+            candles = data["candles"]
+            df = pd.DataFrame(candles, columns=["timestamp", "Open", "High", "Low", "Close", "Volume"])
+            df["Date"] = pd.to_datetime(df["timestamp"], unit="s")
+            df = df.set_index("Date").drop(columns=["timestamp"])
+            return df
+        return pd.DataFrame()
+
+    def search_stocks(self, query: str) -> list[dict]:
+        """Search for stocks on Groww."""
+        data = self._api_get(GROWW_SEARCH_URL, params={
+            "page": "0",
+            "query": query,
+            "size": "10",
+            "entity_type": "stocks",
+        })
+        if data and "content" in data:
+            return [
+                {
+                    "ticker": item.get("nse_scrip_code", ""),
+                    "name": item.get("title", ""),
+                    "isin": item.get("isin", ""),
+                    "source": "Groww",
+                }
+                for item in data["content"]
+            ]
+        return []
+
+    def get_portfolio_holdings(self) -> list[dict[str, Any]]:
+        """
+        Fetch user's equity holdings from Groww.
+
+        Requires a valid JWT token (GROWW_API_TOKEN in .env).
+        Returns a list of dicts with keys: ticker, quantity, buy_price, current_price, isin.
+
+        Note: Groww's private holdings API is reverse-engineered and may break
+        without notice if they update their app.
+        """
+        data = self._api_get(f"{GROWW_API_BASE}/user/portfolio/v1/holdings")
+        if not data:
+            # Some versions nest under 'data' or 'holdingDetails'
+            logger.warning("Groww holdings API returned empty response")
+            return []
+
+        # Normalise various response shapes seen in the wild
+        raw: list = (
+            data.get("holdingDetails")
+            or data.get("holdings")
+            or data.get("data", {}).get("holdingDetails")
+            or []
+        )
+
+        holdings = []
+        for item in raw:
+            try:
+                ticker = (
+                    item.get("tradingSymbol")
+                    or item.get("nseScripCode")
+                    or item.get("ticker", "")
+                ).upper().replace("-EQ", "")
+                if not ticker:
+                    continue
+                holdings.append({
+                    "ticker": ticker,
+                    "quantity": int(item.get("quantity", 0) or item.get("holdingQty", 0)),
+                    "buy_price": float(
+                        item.get("averagePrice", 0)
+                        or item.get("avgBuyPrice", 0)
+                        or 0
+                    ),
+                    "current_price": float(item.get("ltp", 0) or item.get("lastPrice", 0) or 0),
+                    "isin": item.get("isin", ""),
+                })
+            except (KeyError, ValueError, TypeError) as exc:
+                logger.debug("Skipping malformed Groww holding: %s — %s", item, exc)
+
+        return holdings
+
+    def get_fundamentals(self, symbol: str) -> dict[str, Any]:
+        """Fetch stock fundamentals from Groww, falling back to yfinance on failure."""
+        clean = strip_suffix(symbol)
+        data = self._api_get(
+            f"{GROWW_API_BASE}/stocks_data/v1/company/search_id/{clean.lower()}/fundamental",
+        )
+        if data:
+            ratios = data.get("ratios", {})
+            return {
+                "ticker": clean,
+                "pe_ratio": ratios.get("peRatio", 0),
+                "pb_ratio": ratios.get("pbRatio", 0),
+                "dividend_yield": ratios.get("dividendYield", 0),
+                "roe": ratios.get("roe", 0),
+                "market_cap_cr": data.get("marketCap", 0) / 1e7 if data.get("marketCap") else 0,
+                "source": "Groww",
+            }
+        # Groww unavailable — fall back to yfinance
+        try:
+            import yfinance as yf
+            tk = yf.Ticker(f"{clean}.NS")
+            info = tk.info or {}
+            return {
+                "ticker": clean,
+                "pe_ratio": round(info.get("trailingPE") or info.get("forwardPE") or 0, 2),
+                "pb_ratio": round(info.get("priceToBook") or 0, 2),
+                "dividend_yield": round((info.get("dividendYield") or 0) * 100, 2),
+                "roe": round((info.get("returnOnEquity") or 0) * 100, 2),
+                "market_cap_cr": round((info.get("marketCap") or 0) / 1e7, 2),
+                "source": "yfinance",
+            }
+        except Exception:
+            return {"ticker": clean, "error": "Fundamentals unavailable", "source": "none"}
+
+
+_groww_connector: Optional[GrowwConnector] = None
+
+
+def get_groww_connector() -> GrowwConnector:
+    """Get singleton Groww connector."""
+    global _groww_connector
+    if _groww_connector is None:
+        _groww_connector = GrowwConnector()
+        # Register with ConnectorRegistry
+        from src.connectors.base_connector import get_registry
+        get_registry().register(_groww_connector)
+    return _groww_connector
